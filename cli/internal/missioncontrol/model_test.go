@@ -1266,14 +1266,14 @@ func TestStateSelectionResetsOnInstanceChange(t *testing.T) {
 	}
 }
 
-func TestStateTabUsesPlaceholderForTerminalStates(t *testing.T) {
+func TestStateTabUsesPlaceholderForInfraFailure(t *testing.T) {
 	m := &model{
 		autoStateSelect: true,
 		snapshot: runnerapi.RunSnapshot{
 			Instances: []runnerapi.InstanceSnapshot{{
 				Instance: store.Instance{
 					InstanceID: "inst_1",
-					State:      domain.InstanceStateSucceeded,
+					State:      domain.InstanceStateInfraFailed,
 				},
 			}},
 		},
@@ -1281,13 +1281,76 @@ func TestStateTabUsesPlaceholderForTerminalStates(t *testing.T) {
 
 	cmd := m.maybeLoadSelectedLog()
 	if cmd != nil {
-		t.Fatalf("did not expect load command for terminal state")
+		t.Fatalf("did not expect load command for infrastructure failure")
 	}
-	if m.selectedState != simplifiedStateSucceeded {
-		t.Fatalf("expected succeeded selected state, got %s", m.selectedState)
+	if m.selectedState != simplifiedStateInfraFailed {
+		t.Fatalf("expected infra failed selected state, got %s", m.selectedState)
 	}
 	if m.logText != "No logs for this state" {
 		t.Fatalf("expected terminal placeholder, got %q", m.logText)
+	}
+}
+
+func TestGradedTerminalStatesLoadTestOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		state      domain.InstanceState
+		simplified simplifiedState
+	}{
+		{name: "succeeded", state: domain.InstanceStateSucceeded, simplified: simplifiedStateSucceeded},
+		{name: "test failed", state: domain.InstanceStateTestFailed, simplified: simplifiedStateTestFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := runnerapi.InstanceSnapshot{
+				Instance: store.Instance{
+					InstanceID: "inst_1",
+					State:      tc.state,
+				},
+				Artifacts: []store.Artifact{
+					{
+						ArtifactID: "art_stdout",
+						Role:       store.ArtifactRoleTestStdout,
+						StoreKey:   "instances/inst_1/test/test_stdout.txt",
+					},
+					{
+						ArtifactID: "art_stderr",
+						Role:       store.ArtifactRoleTestStderr,
+						StoreKey:   "instances/inst_1/test/test_stderr.txt",
+					},
+				},
+			}
+			source := &fakeMissionSource{
+				texts: map[string]ArtifactText{
+					"art_stdout": {Text: "grading result\n"},
+					"art_stderr": {Text: "candidate patch\n"},
+				},
+			}
+			m := newModel(context.Background(), Config{
+				RunID:            "run_1",
+				Source:           source,
+				TextPreviewLimit: DefaultTextPreviewLimit,
+			})
+			m.snapshot = runnerapi.RunSnapshot{
+				Run:       store.Run{RunID: "run_1", State: domain.RunStateCompleted},
+				Instances: []runnerapi.InstanceSnapshot{inst},
+			}
+
+			cmd := m.maybeLoadSelectedLog()
+			if cmd == nil {
+				t.Fatalf("expected test output load command for %s state", tc.name)
+			}
+			if m.selectedState != tc.simplified {
+				t.Fatalf("expected %s selected state, got %s", tc.simplified, m.selectedState)
+			}
+			msg := cmd()
+			_, _ = m.Update(msg)
+			if !strings.Contains(m.logText, "grading result") {
+				t.Fatalf("expected grader stdout in %s state, got %q", tc.name, m.logText)
+			}
+			if !strings.Contains(m.logText, "candidate patch") {
+				t.Fatalf("expected grader stderr in %s state, got %q", tc.name, m.logText)
+			}
+		})
 	}
 }
 
